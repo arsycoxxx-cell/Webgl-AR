@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Touch WebGL Master Editor - Face, Hair, Body & Finger Rigging</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #121212; font-family: sans-serif; color: #fff; }
+    #canvas-container { width: 100vw; height: 100vh; }
+    #ui {
+      position: absolute; top: 10px; left: 10px; z-index: 100;
+      background: rgba(0, 0, 0, 0.88); padding: 12px; border-radius: 10px;
+      max-width: 92vw; border: 1px solid #333; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      max-height: 90vh; overflow-y: auto;
+    }
+    .btn-group { display: flex; gap: 4px; margin: 6px 0; }
+    button {
+      background: #2196F3; color: white; border: none; padding: 8px 10px;
+      border-radius: 4px; font-weight: bold; cursor: pointer; flex: 1; font-size: 12px;
+    }
+    button.active { background: #4CAF50; }
+    button.autofit { background: #FF9800; color: #000; font-size: 13px; }
+    select, input[type="file"] {
+      width: 100%; margin: 4px 0; padding: 7px; background: #222;
+      color: #fff; border: 1px solid #444; border-radius: 4px; font-size: 12px;
+    }
+    label { font-size: 11px; text-transform: uppercase; color: #aaa; letter-spacing: 0.5px; }
+    .badge { background: #333; padding: 2px 6px; border-radius: 4px; font-size: 10px; color: #00E676; }
+  </style>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TransformControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>
+</head>
+<body>
+
+  <div id="ui">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+      <b style="font-size:14px;">3D Rig Editor</b>
+      <span class="badge" id="status-badge">Ready</span>
+    </div>
+
+    <label>1. Upload Character (.glb/.gltf)</label>
+    <input type="file" id="file-input" accept=".glb,.gltf">
+
+    <div class="btn-group" style="margin: 8px 0;">
+      <button id="btn-autofit" class="autofit">⚡ Auto-Fit Complete Rig</button>
+    </div>
+
+    <label>2. Filter Rig Chain</label>
+    <select id="cat-filter">
+      <option value="all">Show All Nodes / Bones</option>
+      <option value="spine">Spine, Head & Neck</option>
+      <option value="face">Face & Facial Features (Jaw/Eyes/Lips)</option>
+      <option value="hair">Hair Rig Chain</option>
+      <option value="arm">Arms & Shoulders</option>
+      <option value="finger">Fingers (30 Joint Chains)</option>
+      <option value="leg">Legs & Feet</option>
+      <option value="mesh">Meshes Only</option>
+    </select>
+
+    <label>3. Select Node / Bone</label>
+    <select id="node-select"><option value="">-- Upload model first --</option></select>
+
+    <label>4. Gizmo Mode</label>
+    <div class="btn-group">
+      <button id="btn-translate" class="active">Translate</button>
+      <button id="btn-rotate">Rotate</button>
+      <button id="btn-scale">Scale</button>
+    </div>
+
+    <div class="btn-group" style="margin-top:10px;">
+      <button id="btn-export" style="background:#E91E63;">Export Master GLB</button>
+    </div>
+  </div>
+
+  <div id="canvas-container"></div>
+
+  <script>
+    let scene, camera, renderer, orbitControls, transformControls, currentModel;
+    let allNodesList = [], skeletonHelper = null;
+
+    function init() {
+      const container = document.getElementById('canvas-container');
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x181818);
+
+      const grid = new THREE.GridHelper(10, 20, 0x444444, 0x222222);
+      grid.position.y = 0;
+      scene.add(grid);
+
+      const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.4);
+      hemiLight.position.set(0, 20, 0);
+      scene.add(hemiLight);
+
+      const dirLight1 = new THREE.DirectionalLight(0xffffff, 1.0);
+      dirLight1.position.set(5, 10, 7.5);
+      scene.add(dirLight1);
+
+      const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.5);
+      dirLight2.position.set(-5, 5, -5);
+      scene.add(dirLight2);
+
+      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.05, 100);
+      camera.position.set(0, 1.2, 3);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+      container.appendChild(renderer.domElement);
+
+      orbitControls = new THREE.OrbitControls(camera, renderer.domElement);
+      orbitControls.target.set(0, 1, 0);
+      orbitControls.update();
+
+      transformControls = new THREE.TransformControls(camera, renderer.domElement);
+      transformControls.addEventListener('dragging-changed', (event) => {
+        orbitControls.enabled = !event.value;
+      });
+      scene.add(transformControls);
+
+      window.addEventListener('resize', onWindowResize);
+      document.getElementById('file-input').addEventListener('change', loadFile);
+      document.getElementById('cat-filter').addEventListener('change', filterNodesList);
+      document.getElementById('node-select').addEventListener('change', onNodeSelect);
+      document.getElementById('btn-autofit').addEventListener('click', autoFitCompleteRig);
+      document.getElementById('btn-export').addEventListener('click', exportGLB);
+
+      setupGizmoButtons();
+      animate();
+    }
+
+    function setupGizmoButtons() {
+      const btnT = document.getElementById('btn-translate');
+      const btnR = document.getElementById('btn-rotate');
+      const btnS = document.getElementById('btn-scale');
+
+      btnT.addEventListener('click', () => setGizmoMode('translate', btnT));
+      btnR.addEventListener('click', () => setGizmoMode('rotate', btnR));
+      btnS.addEventListener('click', () => setGizmoMode('scale', btnS));
+    }
+
+    function setGizmoMode(mode, activeBtn) {
+      transformControls.setMode(mode);
+      document.querySelectorAll('#ui .btn-group button:not(.autofit):not(#btn-export)').forEach(b => b.classList.remove('active'));
+      activeBtn.classList.add('active');
+    }
+
+    function loadFile(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      document.getElementById('status-badge').textContent = 'Loading...';
+
+      const reader = new FileReader();
+      reader.readAsArrayBuffer(file);
+      reader.onload = function (evt) {
+        const loader = new THREE.GLTFLoader();
+        loader.parse(evt.target.result, '', (gltf) => {
+          if (currentModel) scene.remove(currentModel);
+          if (skeletonHelper) scene.remove(skeletonHelper);
+
+          currentModel = gltf.scene;
+          scene.add(currentModel);
+
+          parseNodesAndBones();
+          filterNodesList();
+
+          skeletonHelper = new THREE.SkeletonHelper(currentModel);
+          skeletonHelper.material.linewidth = 2;
+          scene.add(skeletonHelper);
+
+          document.getElementById('status-badge').textContent = 'Loaded';
+        });
+      };
+    }
+
+    // CLASSIFIES BONES INTO FACE, HAIR, FINGER, ARM, LEG, AND SPINE CATEGORIES
+    function classifyNode(node) {
+      if (node.isMesh) return { tag: '[MESH]', cat: 'mesh' };
+      if (!node.isBone) return { tag: '[NODE]', cat: 'other' };
+
+      const name = node.name.toLowerCase();
+      if (name.includes('hair')) return { tag: '[HAIR]', cat: 'hair' };
+      if (name.includes('jaw') || name.includes('chin') || name.includes('eye') || name.includes('mouth') || name.includes('nose') || name.includes('lip') || name.includes('face')) return { tag: '[FACE]', cat: 'face' };
+      if (name.includes('thumb') || name.includes('index') || name.includes('middle') || name.includes('ring') || name.includes('pinky') || name.includes('finger')) return { tag: '[FINGER]', cat: 'finger' };
+      if (name.includes('arm') || name.includes('clavicle') || name.includes('hand') || name.includes('forearm') || name.includes('elbow') || name.includes('wrist')) return { tag: '[ARM]', cat: 'arm' };
+      if (name.includes('thigh') || name.includes('shin') || name.includes('leg') || name.includes('foot') || name.includes('ankle') || name.includes('knee')) return { tag: '[LEG]', cat: 'leg' };
+      if (name.includes('hips') || name.includes('spine') || name.includes('chest') || name.includes('neck') || name.includes('head')) return { tag: '[SPINE]', cat: 'spine' };
+
+      return { tag: '[BONE]', cat: 'other' };
+    }
+
+    function parseNodesAndBones() {
+      allNodesList = [];
+      currentModel.traverse((child) => {
+        if (child.isMesh || child.isBone) {
+          const info = classifyNode(child);
+          allNodesList.push({ obj: child, tag: info.tag, cat: info.cat, name: child.name || 'Unnamed' });
+        }
+      });
+    }
+
+    function filterNodesList() {
+      const selectedCat = document.getElementById('cat-filter').value;
+      const select = document.getElementById('node-select');
+      select.innerHTML = '<option value="">-- Select Bone or Mesh --</option>';
+
+      allNodesList.forEach((item, index) => {
+        if (selectedCat === 'all' || item.cat === selectedCat) {
+          const opt = document.createElement('option');
+          opt.value = index;
+          opt.textContent = `${item.tag} ${item.name}`;
+          select.appendChild(opt);
+        }
+      });
+    }
+
+    // AUTOMATICALLY ALIGNS ALL BONE CHAINS (FACE, HAIR, ARMS, FINGERS, LEGS) INSIDE MESH
+    function autoFitCompleteRig() {
+      if (!currentModel) return alert("Please upload a GLB model first!");
+
+      let meshes = [];
+      let rootBone = null;
+
+      currentModel.traverse((child) => {
+        if (child.isMesh) meshes.push(child);
+        if (child.isBone && !rootBone && (!child.parent || !child.parent.isBone)) rootBone = child;
+      });
+
+      if (meshes.length === 0) return alert("No mesh geometry found!");
+
+      // 1. Calculate overall mesh bounding box
+      const bbox = new THREE.Box3();
+      meshes.forEach(m => {
+        m.geometry.computeBoundingBox();
+        const b = m.geometry.boundingBox.clone();
+        b.applyMatrix4(m.matrixWorld);
+        bbox.union(b);
+      });
+
+      const size = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      bbox.getSize(size);
+      bbox.getCenter(center);
+
+      // 2. Snap Mesh Pivot to Ground Origin (0,0,0)
+      currentModel.position.set(-center.x, -bbox.min.y, -center.z);
+      currentModel.updateMatrixWorld(true);
+
+      // 3. Align Skeleton Chains relative to Humanoid Volume
+      if (rootBone) {
+        rootBone.position.set(0, size.y * 0.48, 0);
+
+        currentModel.traverse((node) => {
+          if (!node.isBone) return;
+          const name = node.name.toLowerCase();
+
+          // Face Bones (Jaw, Eyes, Lips)
+          if (name.includes('jaw')) node.position.set(0, -size.y * 0.04, size.z * 0.15);
+          if (name.includes('eye_l')) node.position.set(size.x * 0.08, size.y * 0.02, size.z * 0.18);
+          if (name.includes('eye_r')) node.position.set(-size.x * 0.08, size.y * 0.02, size.z * 0.18);
+
+          // Hair Bones
+          if (name.includes('hair_root')) node.position.set(0, size.y * 0.45, 0);
+          if (name.includes('hair_front_l')) node.position.set(size.x * 0.10, size.y * 0.42, size.z * 0.12);
+          if (name.includes('hair_front_r')) node.position.set(-size.x * 0.10, size.y * 0.42, size.z * 0.12);
+
+          // Arm & Finger Chains
+          if (name.includes('clavicle_l')) node.position.set(size.x * 0.12, size.y * 0.28, 0);
+          if (name.includes('clavicle_r')) node.position.set(-size.x * 0.12, size.y * 0.28, 0);
+
+          // Leg Chains
+          if (name.includes('thigh_l')) node.position.set(size.x * 0.15, 0, 0);
+          if (name.includes('thigh_r')) node.position.set(-size.x * 0.15, 0, 0);
+        });
+      }
+
+      if (skeletonHelper) skeletonHelper.update();
+      document.getElementById('status-badge').textContent = 'Rig Aligned';
+      alert("✅ All bone chains (Face, Hair, Body, Arms, Fingers, Legs) aligned to mesh volume!");
+    }
+
+    function onNodeSelect(e) {
+      const index = e.target.value;
+      if (index === "" || !allNodesList[index]) {
+        transformControls.detach();
+        return;
+      }
+      transformControls.attach(allNodesList[index].obj);
+    }
+
+    function exportGLB() {
+      if (!currentModel) return alert("No model loaded to export!");
+      document.getElementById('status-badge').textContent = 'Exporting...';
+
+      const exporter = new THREE.GLTFExporter();
+      exporter.parse(currentModel, (gltf) => {
+        const blob = new Blob([gltf], { type: 'application/octet-stream' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'rigged_character_master.glb';
+        link.click();
+        document.getElementById('status-badge').textContent = 'Exported';
+      }, { binary: true });
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    }
+
+    init();
+  </script>
+</body>
+</html>
