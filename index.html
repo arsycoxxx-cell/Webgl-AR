@@ -3,16 +3,26 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>Touch WebGL Master Editor - Face, Hair, Body & Finger Rigging</title>
+  <title>Touch WebGL Editor - Auto Camera Framing</title>
   <style>
     body { margin: 0; overflow: hidden; background: #121212; font-family: sans-serif; color: #fff; }
     #canvas-container { width: 100vw; height: 100vh; }
+    
+    /* Toggle Button for Mobile Screens */
+    #toggle-ui-btn {
+      position: absolute; top: 10px; right: 10px; z-index: 101;
+      background: #333; color: #fff; border: 1px solid #555;
+      padding: 8px 12px; border-radius: 6px; font-weight: bold; cursor: pointer;
+    }
+
     #ui {
       position: absolute; top: 10px; left: 10px; z-index: 100;
-      background: rgba(0, 0, 0, 0.88); padding: 12px; border-radius: 10px;
-      max-width: 92vw; border: 1px solid #333; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-      max-height: 90vh; overflow-y: auto;
+      background: rgba(0, 0, 0, 0.90); padding: 12px; border-radius: 10px;
+      max-width: 88vw; border: 1px solid #333; box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+      max-height: 85vh; overflow-y: auto; transition: opacity 0.2s, transform 0.2s;
     }
+    #ui.hidden { opacity: 0; pointer-events: none; transform: translateY(-20px); }
+
     .btn-group { display: flex; gap: 4px; margin: 6px 0; }
     button {
       background: #2196F3; color: white; border: none; padding: 8px 10px;
@@ -36,6 +46,8 @@
 </head>
 <body>
 
+  <button id="toggle-ui-btn">👁️ Toggle Menu</button>
+
   <div id="ui">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
       <b style="font-size:14px;">3D Rig Editor</b>
@@ -47,13 +59,14 @@
 
     <div class="btn-group" style="margin: 8px 0;">
       <button id="btn-autofit" class="autofit">⚡ Auto-Fit Complete Rig</button>
+      <button id="btn-focus" style="background:#00BCD4;">🎯 Focus Camera</button>
     </div>
 
     <label>2. Filter Rig Chain</label>
     <select id="cat-filter">
       <option value="all">Show All Nodes / Bones</option>
       <option value="spine">Spine, Head & Neck</option>
-      <option value="face">Face & Facial Features (Jaw/Eyes/Lips)</option>
+      <option value="face">Face Features (Jaw/Eyes/Lips)</option>
       <option value="hair">Hair Rig Chain</option>
       <option value="arm">Arms & Shoulders</option>
       <option value="finger">Fingers (30 Joint Chains)</option>
@@ -88,24 +101,20 @@
       scene = new THREE.Scene();
       scene.background = new THREE.Color(0x181818);
 
-      const grid = new THREE.GridHelper(10, 20, 0x444444, 0x222222);
-      grid.position.y = 0;
+      const grid = new THREE.GridHelper(50, 50, 0x444444, 0x222222);
       scene.add(grid);
 
       const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.4);
       hemiLight.position.set(0, 20, 0);
       scene.add(hemiLight);
 
-      const dirLight1 = new THREE.DirectionalLight(0xffffff, 1.0);
-      dirLight1.position.set(5, 10, 7.5);
-      scene.add(dirLight1);
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+      dirLight.position.set(5, 10, 7.5);
+      scene.add(dirLight);
 
-      const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.5);
-      dirLight2.position.set(-5, 5, -5);
-      scene.add(dirLight2);
-
-      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.05, 100);
-      camera.position.set(0, 1.2, 3);
+      // Extended far clipping plane (0.01 to 10,000) to prevent large scan meshes from disappearing
+      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 10000);
+      camera.position.set(0, 1.5, 4);
 
       renderer = new THREE.WebGLRenderer({ antialias: true });
       renderer.setPixelRatio(window.devicePixelRatio);
@@ -128,7 +137,12 @@
       document.getElementById('cat-filter').addEventListener('change', filterNodesList);
       document.getElementById('node-select').addEventListener('change', onNodeSelect);
       document.getElementById('btn-autofit').addEventListener('click', autoFitCompleteRig);
+      document.getElementById('btn-focus').addEventListener('click', () => { if (currentModel) frameModel(currentModel); });
       document.getElementById('btn-export').addEventListener('click', exportGLB);
+
+      document.getElementById('toggle-ui-btn').addEventListener('click', () => {
+        document.getElementById('ui').classList.toggle('hidden');
+      });
 
       setupGizmoButtons();
       animate();
@@ -146,8 +160,27 @@
 
     function setGizmoMode(mode, activeBtn) {
       transformControls.setMode(mode);
-      document.querySelectorAll('#ui .btn-group button:not(.autofit):not(#btn-export)').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('#ui .btn-group button:not(.autofit):not(#btn-export):not(#btn-focus)').forEach(b => b.classList.remove('active'));
       activeBtn.classList.add('active');
+    }
+
+    // AUTOMATIC CAMERA FOCUS ENGINE: Centers camera on model bounds
+    function frameModel(obj) {
+      const bbox = new THREE.Box3().setFromObject(obj);
+      const size = bbox.getSize(new THREE.Vector3());
+      const center = bbox.getCenter(new THREE.Vector3());
+
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const fov = camera.fov * (Math.PI / 180);
+      let cameraDist = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * 1.8;
+
+      if (cameraDist === 0 || isNaN(cameraDist)) cameraDist = 3;
+
+      camera.position.set(center.x, center.y + size.y * 0.1, center.z + cameraDist);
+      camera.lookAt(center);
+
+      orbitControls.target.copy(center);
+      orbitControls.update();
     }
 
     function loadFile(e) {
@@ -174,12 +207,14 @@
           skeletonHelper.material.linewidth = 2;
           scene.add(skeletonHelper);
 
+          // Auto-frame camera to model upon load
+          frameModel(currentModel);
+
           document.getElementById('status-badge').textContent = 'Loaded';
         });
       };
     }
 
-    // CLASSIFIES BONES INTO FACE, HAIR, FINGER, ARM, LEG, AND SPINE CATEGORIES
     function classifyNode(node) {
       if (node.isMesh) return { tag: '[MESH]', cat: 'mesh' };
       if (!node.isBone) return { tag: '[NODE]', cat: 'other' };
@@ -220,7 +255,6 @@
       });
     }
 
-    // AUTOMATICALLY ALIGNS ALL BONE CHAINS (FACE, HAIR, ARMS, FINGERS, LEGS) INSIDE MESH
     function autoFitCompleteRig() {
       if (!currentModel) return alert("Please upload a GLB model first!");
 
@@ -234,7 +268,6 @@
 
       if (meshes.length === 0) return alert("No mesh geometry found!");
 
-      // 1. Calculate overall mesh bounding box
       const bbox = new THREE.Box3();
       meshes.forEach(m => {
         m.geometry.computeBoundingBox();
@@ -248,11 +281,9 @@
       bbox.getSize(size);
       bbox.getCenter(center);
 
-      // 2. Snap Mesh Pivot to Ground Origin (0,0,0)
       currentModel.position.set(-center.x, -bbox.min.y, -center.z);
       currentModel.updateMatrixWorld(true);
 
-      // 3. Align Skeleton Chains relative to Humanoid Volume
       if (rootBone) {
         rootBone.position.set(0, size.y * 0.48, 0);
 
@@ -260,29 +291,26 @@
           if (!node.isBone) return;
           const name = node.name.toLowerCase();
 
-          // Face Bones (Jaw, Eyes, Lips)
           if (name.includes('jaw')) node.position.set(0, -size.y * 0.04, size.z * 0.15);
           if (name.includes('eye_l')) node.position.set(size.x * 0.08, size.y * 0.02, size.z * 0.18);
           if (name.includes('eye_r')) node.position.set(-size.x * 0.08, size.y * 0.02, size.z * 0.18);
 
-          // Hair Bones
           if (name.includes('hair_root')) node.position.set(0, size.y * 0.45, 0);
           if (name.includes('hair_front_l')) node.position.set(size.x * 0.10, size.y * 0.42, size.z * 0.12);
           if (name.includes('hair_front_r')) node.position.set(-size.x * 0.10, size.y * 0.42, size.z * 0.12);
 
-          // Arm & Finger Chains
           if (name.includes('clavicle_l')) node.position.set(size.x * 0.12, size.y * 0.28, 0);
           if (name.includes('clavicle_r')) node.position.set(-size.x * 0.12, size.y * 0.28, 0);
 
-          // Leg Chains
           if (name.includes('thigh_l')) node.position.set(size.x * 0.15, 0, 0);
           if (name.includes('thigh_r')) node.position.set(-size.x * 0.15, 0, 0);
         });
       }
 
       if (skeletonHelper) skeletonHelper.update();
+      frameModel(currentModel);
+
       document.getElementById('status-badge').textContent = 'Rig Aligned';
-      alert("✅ All bone chains (Face, Hair, Body, Arms, Fingers, Legs) aligned to mesh volume!");
     }
 
     function onNodeSelect(e) {
