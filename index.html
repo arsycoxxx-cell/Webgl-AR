@@ -1,354 +1,268 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>Touch WebGL Editor - Auto Camera Framing</title>
-  <style>
-    body { margin: 0; overflow: hidden; background: #121212; font-family: sans-serif; color: #fff; }
-    #canvas-container { width: 100vw; height: 100vh; }
+%%bash
+# 1. Clean workspace completely
+rm -rf character* textures* fix* temp_tex export* *.py generate* master* direct* cpu* fast* merge* pipeline* source.glb HERO*
+
+# 2. Install Blender and dependencies
+apt-get update -qq && apt-get install -y blender python3-numpy python3-pip -qq
+
+# 3. Download source GLB file
+curl -L -o source.glb "https://huggingface.co/spaces/arxxx/ar-cinema-engine/resolve/main/character.glb"
+
+if [ ! -s source.glb ]; then
+  echo "❌ Source download failed!"
+  exit 1
+fi
+
+# 4. Master Native Auto-Weight Skinning Engine Script
+cat << 'EOF' > master_rig_engine.py
+import bpy
+import mathutils
+import math
+import sys
+
+print("--- STARTING NATIVE AUTO-WEIGHT SKINNING ENGINE ---")
+bpy.ops.wm.read_factory_settings(use_empty=True)
+
+# 1. Import source model
+try:
+    bpy.ops.import_scene.gltf(filepath='source.glb')
+    print("✅ Imported source GLB model")
+except Exception as e:
+    print(f"❌ Failed to import glTF: {e}")
+    sys.exit(1)
+
+# Remove scene lights and cameras
+for obj in list(bpy.context.scene.objects):
+    if obj.type in ['CAMERA', 'LIGHT']:
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+# 2. BAKE EVALUATED WORLD MATRICES ONTO VERTICES
+bpy.context.view_layer.update()
+depsgraph = bpy.context.evaluated_depsgraph_get()
+
+mesh_objs = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+if not mesh_objs:
+    print("❌ Error: No mesh found.")
+    sys.exit(1)
+
+new_mesh_objs = []
+for obj in mesh_objs:
+    eval_obj = obj.evaluated_get(depsgraph)
+    me = bpy.data.meshes.new_from_object(eval_obj)
+    me.transform(eval_obj.matrix_world)
     
-    /* Toggle Button for Mobile Screens */
-    #toggle-ui-btn {
-      position: absolute; top: 10px; right: 10px; z-index: 101;
-      background: #333; color: #fff; border: 1px solid #555;
-      padding: 8px 12px; border-radius: 6px; font-weight: bold; cursor: pointer;
-    }
-
-    #ui {
-      position: absolute; top: 10px; left: 10px; z-index: 100;
-      background: rgba(0, 0, 0, 0.90); padding: 12px; border-radius: 10px;
-      max-width: 88vw; border: 1px solid #333; box-shadow: 0 4px 20px rgba(0,0,0,0.6);
-      max-height: 85vh; overflow-y: auto; transition: opacity 0.2s, transform 0.2s;
-    }
-    #ui.hidden { opacity: 0; pointer-events: none; transform: translateY(-20px); }
-
-    .btn-group { display: flex; gap: 4px; margin: 6px 0; }
-    button {
-      background: #2196F3; color: white; border: none; padding: 8px 10px;
-      border-radius: 4px; font-weight: bold; cursor: pointer; flex: 1; font-size: 12px;
-    }
-    button.active { background: #4CAF50; }
-    button.autofit { background: #FF9800; color: #000; font-size: 13px; }
-    select, input[type="file"] {
-      width: 100%; margin: 4px 0; padding: 7px; background: #222;
-      color: #fff; border: 1px solid #444; border-radius: 4px; font-size: 12px;
-    }
-    label { font-size: 11px; text-transform: uppercase; color: #aaa; letter-spacing: 0.5px; }
-    .badge { background: #333; padding: 2px 6px; border-radius: 4px; font-size: 10px; color: #00E676; }
-  </style>
-
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TransformControls.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>
-</head>
-<body>
-
-  <button id="toggle-ui-btn">👁️ Toggle Menu</button>
-
-  <div id="ui">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-      <b style="font-size:14px;">3D Rig Editor</b>
-      <span class="badge" id="status-badge">Ready</span>
-    </div>
-
-    <label>1. Upload Character (.glb/.gltf)</label>
-    <input type="file" id="file-input" accept=".glb,.gltf">
-
-    <div class="btn-group" style="margin: 8px 0;">
-      <button id="btn-autofit" class="autofit">⚡ Auto-Fit Complete Rig</button>
-      <button id="btn-focus" style="background:#00BCD4;">🎯 Focus Camera</button>
-    </div>
-
-    <label>2. Filter Rig Chain</label>
-    <select id="cat-filter">
-      <option value="all">Show All Nodes / Bones</option>
-      <option value="spine">Spine, Head & Neck</option>
-      <option value="face">Face Features (Jaw/Eyes/Lips)</option>
-      <option value="hair">Hair Rig Chain</option>
-      <option value="arm">Arms & Shoulders</option>
-      <option value="finger">Fingers (30 Joint Chains)</option>
-      <option value="leg">Legs & Feet</option>
-      <option value="mesh">Meshes Only</option>
-    </select>
-
-    <label>3. Select Node / Bone</label>
-    <select id="node-select"><option value="">-- Upload model first --</option></select>
-
-    <label>4. Gizmo Mode</label>
-    <div class="btn-group">
-      <button id="btn-translate" class="active">Translate</button>
-      <button id="btn-rotate">Rotate</button>
-      <button id="btn-scale">Scale</button>
-    </div>
-
-    <div class="btn-group" style="margin-top:10px;">
-      <button id="btn-export" style="background:#E91E63;">Export Master GLB</button>
-    </div>
-  </div>
-
-  <div id="canvas-container"></div>
-
-  <script>
-    let scene, camera, renderer, orbitControls, transformControls, currentModel;
-    let allNodesList = [], skeletonHelper = null;
-
-    function init() {
-      const container = document.getElementById('canvas-container');
-
-      scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x181818);
-
-      const grid = new THREE.GridHelper(50, 50, 0x444444, 0x222222);
-      scene.add(grid);
-
-      const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.4);
-      hemiLight.position.set(0, 20, 0);
-      scene.add(hemiLight);
-
-      const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
-      dirLight.position.set(5, 10, 7.5);
-      scene.add(dirLight);
-
-      // Extended far clipping plane (0.01 to 10,000) to prevent large scan meshes from disappearing
-      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 10000);
-      camera.position.set(0, 1.5, 4);
-
-      renderer = new THREE.WebGLRenderer({ antialias: true });
-      renderer.setPixelRatio(window.devicePixelRatio);
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
-      container.appendChild(renderer.domElement);
-
-      orbitControls = new THREE.OrbitControls(camera, renderer.domElement);
-      orbitControls.target.set(0, 1, 0);
-      orbitControls.update();
-
-      transformControls = new THREE.TransformControls(camera, renderer.domElement);
-      transformControls.addEventListener('dragging-changed', (event) => {
-        orbitControls.enabled = !event.value;
-      });
-      scene.add(transformControls);
-
-      window.addEventListener('resize', onWindowResize);
-      document.getElementById('file-input').addEventListener('change', loadFile);
-      document.getElementById('cat-filter').addEventListener('change', filterNodesList);
-      document.getElementById('node-select').addEventListener('change', onNodeSelect);
-      document.getElementById('btn-autofit').addEventListener('click', autoFitCompleteRig);
-      document.getElementById('btn-focus').addEventListener('click', () => { if (currentModel) frameModel(currentModel); });
-      document.getElementById('btn-export').addEventListener('click', exportGLB);
-
-      document.getElementById('toggle-ui-btn').addEventListener('click', () => {
-        document.getElementById('ui').classList.toggle('hidden');
-      });
-
-      setupGizmoButtons();
-      animate();
-    }
-
-    function setupGizmoButtons() {
-      const btnT = document.getElementById('btn-translate');
-      const btnR = document.getElementById('btn-rotate');
-      const btnS = document.getElementById('btn-scale');
-
-      btnT.addEventListener('click', () => setGizmoMode('translate', btnT));
-      btnR.addEventListener('click', () => setGizmoMode('rotate', btnR));
-      btnS.addEventListener('click', () => setGizmoMode('scale', btnS));
-    }
-
-    function setGizmoMode(mode, activeBtn) {
-      transformControls.setMode(mode);
-      document.querySelectorAll('#ui .btn-group button:not(.autofit):not(#btn-export):not(#btn-focus)').forEach(b => b.classList.remove('active'));
-      activeBtn.classList.add('active');
-    }
-
-    // AUTOMATIC CAMERA FOCUS ENGINE: Centers camera on model bounds
-    function frameModel(obj) {
-      const bbox = new THREE.Box3().setFromObject(obj);
-      const size = bbox.getSize(new THREE.Vector3());
-      const center = bbox.getCenter(new THREE.Vector3());
-
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const fov = camera.fov * (Math.PI / 180);
-      let cameraDist = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * 1.8;
-
-      if (cameraDist === 0 || isNaN(cameraDist)) cameraDist = 3;
-
-      camera.position.set(center.x, center.y + size.y * 0.1, center.z + cameraDist);
-      camera.lookAt(center);
-
-      orbitControls.target.copy(center);
-      orbitControls.update();
-    }
-
-    function loadFile(e) {
-      const file = e.target.files[0];
-      if (!file) return;
-
-      document.getElementById('status-badge').textContent = 'Loading...';
-
-      const reader = new FileReader();
-      reader.readAsArrayBuffer(file);
-      reader.onload = function (evt) {
-        const loader = new THREE.GLTFLoader();
-        loader.parse(evt.target.result, '', (gltf) => {
-          if (currentModel) scene.remove(currentModel);
-          if (skeletonHelper) scene.remove(skeletonHelper);
-
-          currentModel = gltf.scene;
-          scene.add(currentModel);
-
-          parseNodesAndBones();
-          filterNodesList();
-
-          skeletonHelper = new THREE.SkeletonHelper(currentModel);
-          skeletonHelper.material.linewidth = 2;
-          scene.add(skeletonHelper);
-
-          // Auto-frame camera to model upon load
-          frameModel(currentModel);
-
-          document.getElementById('status-badge').textContent = 'Loaded';
-        });
-      };
-    }
-
-    function classifyNode(node) {
-      if (node.isMesh) return { tag: '[MESH]', cat: 'mesh' };
-      if (!node.isBone) return { tag: '[NODE]', cat: 'other' };
-
-      const name = node.name.toLowerCase();
-      if (name.includes('hair')) return { tag: '[HAIR]', cat: 'hair' };
-      if (name.includes('jaw') || name.includes('chin') || name.includes('eye') || name.includes('mouth') || name.includes('nose') || name.includes('lip') || name.includes('face')) return { tag: '[FACE]', cat: 'face' };
-      if (name.includes('thumb') || name.includes('index') || name.includes('middle') || name.includes('ring') || name.includes('pinky') || name.includes('finger')) return { tag: '[FINGER]', cat: 'finger' };
-      if (name.includes('arm') || name.includes('clavicle') || name.includes('hand') || name.includes('forearm') || name.includes('elbow') || name.includes('wrist')) return { tag: '[ARM]', cat: 'arm' };
-      if (name.includes('thigh') || name.includes('shin') || name.includes('leg') || name.includes('foot') || name.includes('ankle') || name.includes('knee')) return { tag: '[LEG]', cat: 'leg' };
-      if (name.includes('hips') || name.includes('spine') || name.includes('chest') || name.includes('neck') || name.includes('head')) return { tag: '[SPINE]', cat: 'spine' };
-
-      return { tag: '[BONE]', cat: 'other' };
-    }
-
-    function parseNodesAndBones() {
-      allNodesList = [];
-      currentModel.traverse((child) => {
-        if (child.isMesh || child.isBone) {
-          const info = classifyNode(child);
-          allNodesList.push({ obj: child, tag: info.tag, cat: info.cat, name: child.name || 'Unnamed' });
-        }
-      });
-    }
-
-    function filterNodesList() {
-      const selectedCat = document.getElementById('cat-filter').value;
-      const select = document.getElementById('node-select');
-      select.innerHTML = '<option value="">-- Select Bone or Mesh --</option>';
-
-      allNodesList.forEach((item, index) => {
-        if (selectedCat === 'all' || item.cat === selectedCat) {
-          const opt = document.createElement('option');
-          opt.value = index;
-          opt.textContent = `${item.tag} ${item.name}`;
-          select.appendChild(opt);
-        }
-      });
-    }
-
-    function autoFitCompleteRig() {
-      if (!currentModel) return alert("Please upload a GLB model first!");
-
-      let meshes = [];
-      let rootBone = null;
-
-      currentModel.traverse((child) => {
-        if (child.isMesh) meshes.push(child);
-        if (child.isBone && !rootBone && (!child.parent || !child.parent.isBone)) rootBone = child;
-      });
-
-      if (meshes.length === 0) return alert("No mesh geometry found!");
-
-      const bbox = new THREE.Box3();
-      meshes.forEach(m => {
-        m.geometry.computeBoundingBox();
-        const b = m.geometry.boundingBox.clone();
-        b.applyMatrix4(m.matrixWorld);
-        bbox.union(b);
-      });
-
-      const size = new THREE.Vector3();
-      const center = new THREE.Vector3();
-      bbox.getSize(size);
-      bbox.getCenter(center);
-
-      currentModel.position.set(-center.x, -bbox.min.y, -center.z);
-      currentModel.updateMatrixWorld(true);
-
-      if (rootBone) {
-        rootBone.position.set(0, size.y * 0.48, 0);
-
-        currentModel.traverse((node) => {
-          if (!node.isBone) return;
-          const name = node.name.toLowerCase();
-
-          if (name.includes('jaw')) node.position.set(0, -size.y * 0.04, size.z * 0.15);
-          if (name.includes('eye_l')) node.position.set(size.x * 0.08, size.y * 0.02, size.z * 0.18);
-          if (name.includes('eye_r')) node.position.set(-size.x * 0.08, size.y * 0.02, size.z * 0.18);
-
-          if (name.includes('hair_root')) node.position.set(0, size.y * 0.45, 0);
-          if (name.includes('hair_front_l')) node.position.set(size.x * 0.10, size.y * 0.42, size.z * 0.12);
-          if (name.includes('hair_front_r')) node.position.set(-size.x * 0.10, size.y * 0.42, size.z * 0.12);
-
-          if (name.includes('clavicle_l')) node.position.set(size.x * 0.12, size.y * 0.28, 0);
-          if (name.includes('clavicle_r')) node.position.set(-size.x * 0.12, size.y * 0.28, 0);
-
-          if (name.includes('thigh_l')) node.position.set(size.x * 0.15, 0, 0);
-          if (name.includes('thigh_r')) node.position.set(-size.x * 0.15, 0, 0);
-        });
-      }
-
-      if (skeletonHelper) skeletonHelper.update();
-      frameModel(currentModel);
-
-      document.getElementById('status-badge').textContent = 'Rig Aligned';
-    }
-
-    function onNodeSelect(e) {
-      const index = e.target.value;
-      if (index === "" || !allNodesList[index]) {
-        transformControls.detach();
-        return;
-      }
-      transformControls.attach(allNodesList[index].obj);
-    }
-
-    function exportGLB() {
-      if (!currentModel) return alert("No model loaded to export!");
-      document.getElementById('status-badge').textContent = 'Exporting...';
-
-      const exporter = new THREE.GLTFExporter();
-      exporter.parse(currentModel, (gltf) => {
-        const blob = new Blob([gltf], { type: 'application/octet-stream' });
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = 'rigged_character_master.glb';
-        link.click();
-        document.getElementById('status-badge').textContent = 'Exported';
-      }, { binary: true });
-    }
-
-    function onWindowResize() {
-      camera.aspect = window.innerWidth / window.innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
-    }
-
-    function animate() {
-      requestAnimationFrame(animate);
-      renderer.render(scene, camera);
-    }
-
-    init();
-  </script>
-</body>
-</html>
+    new_obj = bpy.data.objects.new(f"Clean_{obj.name}", me)
+    for mat in obj.data.materials:
+        new_obj.data.materials.append(mat)
+        
+    bpy.context.scene.collection.objects.link(new_obj)
+    new_mesh_objs.append(new_obj)
+
+for obj in list(bpy.context.scene.objects):
+    if obj not in new_mesh_objs:
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+# Join all parts (head, body, hair, clothing) into 1 unified mesh
+bpy.ops.object.select_all(action='DESELECT')
+for o in new_mesh_objs:
+    o.select_set(True)
+
+bpy.context.view_layer.objects.active = new_mesh_objs[0]
+bpy.ops.object.join()
+character = bpy.context.active_object
+character.name = "HERO_AR_Mesh"
+
+# Rotate upright if lying horizontal
+bbox = [v.co for v in character.data.vertices]
+dim_y = max(v.y for v in bbox) - min(v.y for v in bbox)
+dim_z = max(v.z for v in bbox) - min(v.z for v in bbox)
+
+if dim_y > dim_z:
+    print("🔄 Rotating character upright (+90° X)...")
+    rot_mat = mathutils.Matrix.Rotation(math.radians(90), 4, 'X')
+    character.data.transform(rot_mat)
+    character.data.update()
+
+# Center pivot point to mesh bounds and snap location to World Origin (0,0,0)
+bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
+character.location = (0.0, 0.0, 0.0)
+character.rotation_euler = (0.0, 0.0, 0.0)
+character.scale = (1.0, 1.0, 1.0)
+bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+
+# Weld neck seam vertices without destroying geometry
+bpy.ops.object.mode_set(mode='EDIT')
+bpy.ops.mesh.select_all(action='SELECT')
+bpy.ops.mesh.remove_doubles(threshold=0.001)
+bpy.ops.mesh.normals_make_consistent(inside=False)
+bpy.ops.object.mode_set(mode='OBJECT')
+
+for poly in character.data.polygons:
+    poly.use_smooth = True
+
+# Pack PBR textures
+for img in bpy.data.images:
+    if img.has_data and img.name != 'Render Result':
+        try:
+            img.pack()
+        except Exception:
+            pass
+
+# 3. MEASURE MESH GEOMETRY BOUNDS
+verts = [v.co for v in character.data.vertices]
+min_x, max_x = min(v.x for v in verts), max(v.x for v in verts)
+min_y, max_y = min(v.y for v in verts), max(v.y for v in verts)
+min_z, max_z = min(v.z for v in verts), max(v.z for v in verts)
+
+height = max_z - min_z
+width = max_x - min_x
+depth = max_y - min_y
+cx = (min_x + max_x) / 2.0
+cy = (min_y + max_y) / 2.0
+
+# Detect outermost hand coordinates on mesh
+arm_zone = [v for v in verts if min_z + height * 0.35 <= v.z <= min_z + height * 0.85]
+if arm_zone:
+    hand_l = max(arm_zone, key=lambda v: v.x)
+    hand_r = min(arm_zone, key=lambda v: v.x)
+else:
+    hand_l = mathutils.Vector((cx + width * 0.45, cy, min_z + height * 0.5))
+    hand_r = mathutils.Vector((cx - width * 0.45, cy, min_z + height * 0.5))
+
+shoulder_z = min_z + height * 0.78
+clav_l = mathutils.Vector((cx + (hand_l.x - cx) * 0.22, hand_l.y, shoulder_z))
+clav_r = mathutils.Vector((cx + (hand_r.x - cx) * 0.22, hand_r.y, shoulder_z))
+
+elbow_l = clav_l.lerp(hand_l, 0.50)
+wrist_l = clav_l.lerp(hand_l, 0.85)
+
+elbow_r = clav_r.lerp(hand_r, 0.50)
+wrist_r = clav_r.lerp(hand_r, 0.85)
+
+# 4. CONSTRUCT COMPLETE SKELETON (SPINE, FACE, HAIR, ARMS, FINGERS, LEGS)
+arm_data = bpy.data.armatures.new("ArmatureData")
+rig = bpy.data.objects.new("Armature", arm_data)
+bpy.context.scene.collection.objects.link(rig)
+
+rig.location = (0.0, 0.0, 0.0)
+rig.rotation_euler = (0.0, 0.0, 0.0)
+rig.scale = (1.0, 1.0, 1.0)
+
+bpy.context.view_layer.objects.active = rig
+bpy.ops.object.mode_set(mode='EDIT')
+
+bones_def = [
+    # Spine Column
+    ("Hips", (cx, cy, min_z + height * 0.48), (cx, cy, min_z + height * 0.60), None),
+    ("Spine", (cx, cy, min_z + height * 0.60), (cx, cy, min_z + height * 0.73), "Hips"),
+    ("Chest", (cx, cy, min_z + height * 0.73), (cx, cy, min_z + height * 0.82), "Spine"),
+    ("Neck", (cx, cy, min_z + height * 0.82), (cx, cy, min_z + height * 0.87), "Chest"),
+    ("Head", (cx, cy, min_z + height * 0.87), (cx, cy, max_z), "Neck"),
+
+    # Face & Hair
+    ("Jaw", (cx, cy - depth * 0.05, min_z + height * 0.87), (cx, cy - depth * 0.15, min_z + height * 0.83), "Head"),
+    ("Eye_L", (cx + width * 0.05, cy - depth * 0.14, min_z + height * 0.90), (cx + width * 0.05, cy - depth * 0.18, min_z + height * 0.90), "Head"),
+    ("Eye_R", (cx - width * 0.05, cy - depth * 0.14, min_z + height * 0.90), (cx - width * 0.05, cy - depth * 0.18, min_z + height * 0.90), "Head"),
+    ("Hair_Root", (cx, cy, min_z + height * 0.94), (cx, cy, max_z + height * 0.02), "Head"),
+
+    # Arms
+    ("Clavicle_L", (cx, cy, shoulder_z), clav_l, "Chest"),
+    ("UpperArm_L", clav_l, elbow_l, "Clavicle_L"),
+    ("Forearm_L", elbow_l, wrist_l, "UpperArm_L"),
+    ("Hand_L", wrist_l, hand_l, "Forearm_L"),
+
+    ("Clavicle_R", (cx, cy, shoulder_z), clav_r, "Chest"),
+    ("UpperArm_R", clav_r, elbow_r, "Clavicle_R"),
+    ("Forearm_R", elbow_r, wrist_r, "UpperArm_R"),
+    ("Hand_R", wrist_r, hand_r, "Forearm_R"),
+
+    # Legs
+    ("Thigh_L", (cx + width * 0.12, cy, min_z + height * 0.48), (cx + width * 0.12, cy, min_z + height * 0.25), "Hips"),
+    ("Shin_L", (cx + width * 0.12, cy, min_z + height * 0.25), (cx + width * 0.12, cy, min_z + height * 0.05), "Thigh_L"),
+    ("Foot_L", (cx + width * 0.12, cy, min_z + height * 0.05), (cx + width * 0.12, cy - depth * 0.18, min_z), "Shin_L"),
+
+    ("Thigh_R", (cx - width * 0.12, cy, min_z + height * 0.48), (cx - width * 0.12, cy, min_z + height * 0.25), "Hips"),
+    ("Shin_R", (cx - width * 0.12, cy, min_z + height * 0.25), (cx - width * 0.12, cy, min_z + height * 0.05), "Thigh_R"),
+    ("Foot_R", (cx - width * 0.12, cy, min_z + height * 0.05), (cx - width * 0.12, cy - depth * 0.18, min_z), "Shin_R")
+]
+
+# 30 Finger Joint Bones
+finger_configs = [("Thumb", 0.02, -0.01), ("Index", 0.01, -0.02), ("Middle", 0.00, -0.025), ("Ring", -0.01, -0.02), ("Pinky", -0.02, -0.015)]
+for side, sign, h_pos, parent_hand in [("L", 1.0, hand_l, "Hand_L"), ("R", -1.0, hand_r, "Hand_R")]:
+    hx, hy, hz = h_pos.x, h_pos.y, h_pos.z
+    for f_name, offset_y_scale, dz_scale in finger_configs:
+        offset_y = offset_y_scale * depth
+        b1, b2, b3 = f"{f_name}1_{side}", f"{f_name}2_{side}", f"{f_name}3_{side}"
+        p1 = (hx, hy + offset_y, hz)
+        p2 = (hx + sign * width * 0.015, hy + offset_y, hz + dz_scale * height * 0.5)
+        p3 = (hx + sign * width * 0.028, hy + offset_y, hz + dz_scale * height * 1.0)
+        p4 = (hx + sign * width * 0.040, hy + offset_y, hz + dz_scale * height * 1.5)
+        bones_def.append((b1, p1, p2, parent_hand))
+        bones_def.append((b2, p2, p3, b1))
+        bones_def.append((b3, p3, p4, b2))
+
+created = {}
+for name, hp, tp, p_name in bones_def:
+    b = arm_data.edit_bones.new(name)
+    b.head, b.tail = hp, tp
+    created[name] = b
+
+for name, hp, tp, p_name in bones_def:
+    if p_name and p_name in created:
+        created[name].parent = created[p_name]
+
+bpy.ops.object.mode_set(mode='OBJECT')
+
+# 5. BIND VERTICES USING BLENDER NATIVE AUTOMATIC HEAT WEIGHTS (ARMATURE_AUTO)
+bpy.ops.object.select_all(action='DESELECT')
+character.select_set(True)
+rig.select_set(True)
+bpy.context.view_layer.objects.active = rig
+
+try:
+    print("⚡ Calculating native automatic skinning heat weights...")
+    bpy.ops.object.parent_set(type='ARMATURE_AUTO')
+    print("✅ ARMATURE_AUTO bound successfully")
+except Exception as e:
+    print(f"⚠️ Falling back to distance skinning solver: {e}")
+    character.vertex_groups.clear()
+    vg_map = {b_name: character.vertex_groups.new(name=b_name) for b_name, _, _, _ in bones_def}
+    for v in character.data.vertices:
+        v_co = v.co
+        closest_bone = None
+        min_dist = float('inf')
+        for b_name, h_pos, t_pos, _ in bones_def:
+            p1 = mathutils.Vector(h_pos)
+            p2 = mathutils.Vector(t_pos)
+            line_vec = p2 - p1
+            line_len = line_vec.length
+            dist = (v_co - p1).length if line_len == 0 else (v_co - (p1 + max(0.0, min(1.0, (v_co - p1).dot(line_vec) / (line_len ** 2))) * line_vec)).length
+            if dist < min_dist:
+                min_dist = dist
+                closest_bone = b_name
+        if closest_bone:
+            vg_map[closest_bone].add([v.index], 1.0, 'REPLACE')
+    character.parent = rig
+    arm_mod = character.modifiers.new(name="Armature", type='ARMATURE')
+    arm_mod.object = rig
+
+# 6. EXPORT FINAL RIGGED GLB MASTER FILE
+print("💾 Exporting HERO_AR_RIGGED_MASTER.glb...")
+bpy.ops.export_scene.gltf(
+    filepath='HERO_AR_RIGGED_MASTER.glb',
+    export_format='GLB',
+    export_materials='EXPORT',
+    export_yup=True
+)
+
+print("🎉 NATIVE AUTO-WEIGHT SKINNING COMPLETE!")
+EOF
+
+# Execute
+blender -b -P master_rig_engine.py
+rm -rf master_rig_engine.py source.glb
+
+echo -e "\n========================================="
+echo "✅ FINAL RIGGED GLB FILE READY FOR DOWNLOAD:"
+ls -lh HERO_AR_RIGGED_MASTER.glb
+echo "========================================="
